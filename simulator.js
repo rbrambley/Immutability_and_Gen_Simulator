@@ -1,6 +1,6 @@
 /* -------------------------------------------------------------
    simulator.js — Diagnostic Mode
-   Rich Brambley Edition
+   Rich Brambley Edition (Debug‑Instrumented)
    -------------------------------------------------------------
    Produces:
    - Storage curve with reasons
@@ -11,9 +11,16 @@
    - Fix recommendations
    - Improved capacity table
    - All ASCII-safe, single <pre> block
+
+   Debug additions:
+   - parser.js–style debugLog() calls
+   - No functional changes
    ------------------------------------------------------------- */
 
 function runSimulator(cfg) {
+
+    debugLog("=== runSimulator() START ===");
+    debugLog("CONFIG:", JSON.stringify(cfg, null, 2));
 
     /* -----------------------------
        Cohort structure
@@ -47,6 +54,17 @@ function runSimulator(cfg) {
         retention,
         simDays
     } = cfg;
+
+    debugLog("Simulation parameters:", JSON.stringify({
+        initialSizeGB,
+        dailyChangeRate,
+        annualGrowthRate,
+        syntheticInterval,
+        minImmutability,
+        blockGenWindow,
+        retention,
+        simDays
+    }, null, 2));
 
     /* -----------------------------
        Helpers
@@ -86,14 +104,19 @@ function runSimulator(cfg) {
 
         const isSynthetic = (day % syntheticInterval === 0);
 
+        // parser.js–style daily summary
+        debugLog(`DAY ${day}: synthetic=${isSynthetic} L=${L.toFixed(2)} D=${D.toFixed(2)}`);
+
         if (isSynthetic) {
             const full = new Cohort(day, L);
             cohorts.push(full);
+            debugLog(`  Synthetic full created cohort: created=${day} size=${L.toFixed(2)}`);
 
             for (const c of cohorts) {
                 if (c.deleteOn === null || day < c.deleteOn) {
                     c.reuseDays.push(day);
                     c.expirations.push(day + minImmutability + blockGenWindow);
+                    debugLog(`  Reuse event: cohort=${c.created} newExp=${c.expirations.at(-1)}`);
                 }
             }
 
@@ -102,6 +125,7 @@ function runSimulator(cfg) {
             const inc = new Cohort(day, D);
             cohorts.push(inc);
             dailyReason.push("Incremental");
+            debugLog(`  Incremental created cohort: created=${day} size=${D.toFixed(2)}`);
         }
 
         for (const c of cohorts) updateDeleteOn(c);
@@ -111,6 +135,8 @@ function runSimulator(cfg) {
             if (day >= c.created && day < c.deleteOn) stored += c.sizeGB;
         }
         dailyStored.push(stored);
+
+        debugLog(`  Stored=${stored.toFixed(2)} cohorts=${cohorts.length}`);
     }
 
     /* -----------------------------
@@ -119,6 +145,8 @@ function runSimulator(cfg) {
 
     const totalCohorts = cohorts.length;
     const reused = cohorts.filter(c => c.reuseDays.length > 0).length;
+
+    debugLog("Total cohorts:", totalCohorts, "Reused:", reused);
 
     const lifetimes = cohorts.map(c => ({
         id: c.created,
@@ -130,8 +158,14 @@ function runSimulator(cfg) {
     lifetimes.sort((a, b) => b.lifetime - a.lifetime);
 
     const top10 = lifetimes.slice(0, 10);
-
     const worst = top10[0].cohort;
+
+    debugLog("Top 10 longest-lived cohorts:", JSON.stringify(top10, null, 2));
+    debugLog("Worst cohort:", JSON.stringify({
+        created: worst.created,
+        lifetime: worst.deleteOn - worst.created,
+        reuseCount: worst.reuseDays.length
+    }, null, 2));
 
     function buildTimeline(c) {
         let out = "";
@@ -147,15 +181,11 @@ function runSimulator(cfg) {
 
         events.push({ day: c.deleteOn, type: "Deleted", exp: null });
 
-        for (const e of events) {
-            if (e.type === "Deleted") {
-                out += `Day ${e.day}: Deleted\n`;
-            } else {
-                out += `Day ${e.day}: ${e.type} → expiration now ${e.exp}\n`;
-            }
-        }
-
-        return out;
+        return events.map(e =>
+            e.type === "Deleted"
+                ? `Day ${e.day}: Deleted`
+                : `Day ${e.day}: ${e.type} → expiration now ${e.exp}`
+        ).join("\n");
     }
 
     const immPlusGen = minImmutability + blockGenWindow;
@@ -208,6 +238,8 @@ OR
     /* -----------------------------
        Final Output Assembly
        ----------------------------- */
+
+    debugLog("=== runSimulator() COMPLETE — assembling output ===");
 
     let out = "";
 
