@@ -1,109 +1,93 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <title>Veeam Object-Storage Immutability + GEN Simulator</title>
     <style>
         body {
-            font-family: Consolas, monospace;
+            font-family: Arial, sans-serif;
             margin: 20px;
-            background: #f7f7f7;
+            background: #f5f5f5;
         }
-        h1 { margin-bottom: 5px; }
-        .section { margin-bottom: 20px; }
-        textarea, input {
+        textarea {
             width: 100%;
-            font-family: Consolas, monospace;
+            height: 200px;
+            font-family: monospace;
+            padding: 10px;
         }
         #output {
-            white-space: pre;
+            white-space: pre-wrap;
             background: #fff;
             padding: 15px;
             border: 1px solid #ccc;
-            overflow-x: auto;
+            margin-top: 20px;
+        }
+        #debugLog {
+            display: none;
+            background: #111;
+            color: #0f0;
+            padding: 10px;
+            margin-top: 20px;
+            max-height: 300px;
+            overflow-y: auto;
+            border: 1px solid #444;
+            white-space: pre-wrap;
         }
     </style>
 </head>
-
 <body>
 
 <h1>Veeam Object-Storage Immutability + GEN Simulator</h1>
 
-<div class="section">
-    <label><input type="radio" name="mode" value="manual" checked> Manual Input</label>
-    <label><input type="radio" name="mode" value="calculator"> Paste Calculator Output</label>
-</div>
+<h3>Paste Calculator Output</h3>
+<textarea id="inputText" placeholder="Paste Veeam Calculator Output here..."></textarea>
 
-<!-- MANUAL INPUT FORM -->
-<div id="manualForm" class="section">
-    <h3>Manual Values</h3>
+<br><br>
+<button id="runBtn">Run Simulation</button>
+<button id="toggleDebug">Enable Debug Mode</button>
 
-    <label>Initial Logical Size (GB)</label>
-    <input id="initialSize" type="number">
+<div id="output"></div>
 
-    <label>Daily Change Rate (%)</label>
-    <input id="dailyChange" type="number">
+<pre id="debugLog"></pre>
 
-    <label>Annual Growth Rate (%)</label>
-    <input id="annualGrowth" type="number">
+<script>
+let DEBUG_ENABLED = false;
 
-    <label>Synthetic Full Interval (days)</label>
-    <input id="syntheticInterval" type="number">
+document.getElementById("toggleDebug").onclick = () => {
+    DEBUG_ENABLED = !DEBUG_ENABLED;
+    document.getElementById("debugLog").style.display = DEBUG_ENABLED ? "block" : "none";
+    document.getElementById("toggleDebug").textContent = DEBUG_ENABLED ? "Disable Debug Mode" : "Enable Debug Mode";
+};
 
-    <label>Minimum Immutability (days)</label>
-    <input id="immutability" type="number">
-
-    <label>Block Generation Window (days)</label>
-    <input id="blockGen" type="number">
-
-    <label>Job Retention (restore points)</label>
-    <input id="retention" type="number">
-
-    <label>Simulation Length (days)</label>
-    <input id="simDays" type="number" value="365">
-</div>
-
-<!-- CALCULATOR PASTE -->
-<div id="calcForm" class="section" style="display:none;">
-    <h3>Paste Veeam Calculator Output</h3>
-    <textarea id="calcInput" rows="12"></textarea>
-</div>
-
-<button onclick="runSimulation()">Run Simulation</button>
-
-<h2>Output</h2>
-<pre id="output">(results will appear here)</pre>
+function debugLog(...args) {
+    if (!DEBUG_ENABLED) return;
+    const el = document.getElementById("debugLog");
+    el.textContent += args.join(" ") + "\n";
+}
+</script>
 
 <script src="parser.js"></script>
 <script src="simulator.js"></script>
 
 <script>
-document.querySelectorAll("input[name='mode']").forEach(r => {
-    r.addEventListener("change", () => {
-        const manual = document.querySelector("input[name='mode'][value='manual']").checked;
-        document.getElementById("manualForm").style.display = manual ? "block" : "none";
-        document.getElementById("calcForm").style.display = manual ? "none" : "block";
-    });
-});
+document.getElementById("runBtn").onclick = () => {
+    const text = document.getElementById("inputText").value;
+    debugLog("=== NEW RUN ===");
+    debugLog("RAW INPUT:", text);
 
-function runSimulation() {
-    const mode = document.querySelector("input[name='mode']:checked").value;
+    const result = parseCalculatorInput(text);
 
-    let config;
-    if (mode === "manual") {
-        config = parseManualInput();
-    } else {
-        config = parseCalculatorInput(document.getElementById("calcInput").value);
-    }
-
-    if (!config.valid) {
-        document.getElementById("output").textContent = "Input error:\n" + config.error;
+    if (!result.ok) {
+        debugLog("PARSER ERROR:", result.error);
+        document.getElementById("output").textContent = "Input error:\n" + result.error;
         return;
     }
 
-    const result = runSimulator(config);
-    document.getElementById("output").textContent = result;
-}
+    debugLog("FINAL CONFIG:", JSON.stringify(result.config, null, 2));
+
+    const simOutput = runSimulation(result.config);
+    document.getElementById("output").textContent = simOutput;
+};
 </script>
 
 </body>
