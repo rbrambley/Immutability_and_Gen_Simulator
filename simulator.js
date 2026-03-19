@@ -1,7 +1,16 @@
 /* -------------------------------------------------------------
-   simulator.js
-   Full cohort-based immutability + GEN rollover simulator
-   ASCII-only minimalist output for GitHub Pages
+   simulator.js — Diagnostic Mode
+   Rich Brambley Edition
+   -------------------------------------------------------------
+   Produces:
+   - Storage curve with reasons
+   - Top 10 longest-lived cohorts
+   - Detailed timeline for worst cohort
+   - GEN rollover diagnostic
+   - Root cause analysis
+   - Fix recommendations
+   - Improved capacity table
+   - All ASCII-safe, single <pre> block
    ------------------------------------------------------------- */
 
 function runSimulator(cfg) {
@@ -26,6 +35,7 @@ function runSimulator(cfg) {
     const dailyStored = [];
     const dailyLogical = [];
     const dailyDelta = [];
+    const dailyReason = [];
 
     const {
         initialSizeGB,
@@ -39,25 +49,18 @@ function runSimulator(cfg) {
     } = cfg;
 
     /* -----------------------------
-       Helper: compute logical size
+       Helpers
        ----------------------------- */
     function logicalSize(day) {
         return initialSizeGB * Math.pow(1 + annualGrowthRate / 365, day);
     }
 
-    /* -----------------------------
-       Helper: compute delta
-       ----------------------------- */
     function deltaFor(day) {
         return logicalSize(day) * dailyChangeRate;
     }
 
-    /* -----------------------------
-       Helper: update delete-on
-       ----------------------------- */
     function updateDeleteOn(c) {
         if (c.reuseDays.length === 0) {
-            // Never reused: delete after retention from creation
             const rpRemove = c.created + retention;
             const exp = c.created + minImmutability + blockGenWindow;
             c.deleteOn = Math.max(rpRemove, exp);
@@ -84,157 +87,150 @@ function runSimulator(cfg) {
         const isSynthetic = (day % syntheticInterval === 0);
 
         if (isSynthetic) {
-            // Synthetic full: new full cohort
             const full = new Cohort(day, L);
             cohorts.push(full);
 
-            // Reuse all active cohorts
             for (const c of cohorts) {
                 if (c.deleteOn === null || day < c.deleteOn) {
                     c.reuseDays.push(day);
                     c.expirations.push(day + minImmutability + blockGenWindow);
                 }
             }
+
+            dailyReason.push("Synthetic full + reuse");
         } else {
-            // Incremental: new delta cohort
             const inc = new Cohort(day, D);
             cohorts.push(inc);
+            dailyReason.push("Incremental");
         }
 
-        // Update delete-on for all cohorts
-        for (const c of cohorts) {
-            updateDeleteOn(c);
-        }
+        for (const c of cohorts) updateDeleteOn(c);
 
-        // Compute stored GB for the day
         let stored = 0;
         for (const c of cohorts) {
-            if (day >= c.created && day < c.deleteOn) {
-                stored += c.sizeGB;
-            }
+            if (day >= c.created && day < c.deleteOn) stored += c.sizeGB;
         }
         dailyStored.push(stored);
     }
 
     /* -----------------------------
-       SECTION A: ASCII line chart
+       Diagnostics
        ----------------------------- */
-    function asciiChart(values, width = 60, height = 12) {
-        const max = Math.max(...values);
-        const min = 0;
-        const scale = (max - min) || 1;
 
-        const rows = [];
-        for (let h = 0; h < height; h++) {
-            const threshold = max - (h / (height - 1)) * scale;
-            let row = "";
-            for (let i = 0; i < values.length; i += Math.ceil(values.length / width)) {
-                row += (values[i] >= threshold ? "#" : " ");
-            }
-            rows.push(row);
-        }
-        return rows.join("\n");
-    }
-
-    const chart = asciiChart(dailyStored);
-
-    /* -----------------------------
-       SECTION B: Lifecycle summary
-       ----------------------------- */
     const totalCohorts = cohorts.length;
     const reused = cohorts.filter(c => c.reuseDays.length > 0).length;
-    const longest = Math.max(...cohorts.map(c => c.deleteOn - c.created));
-    const avgImmutExt = average(
-        cohorts.flatMap(c => c.expirations.map(e => e - c.created))
-    );
-    const maxGen = Math.max(
-        ...cohorts.flatMap(c => c.expirations.map(e => e - c.created))
-    );
 
-    function average(arr) {
-        if (arr.length === 0) return 0;
-        return arr.reduce((a, b) => a + b, 0) / arr.length;
+    const lifetimes = cohorts.map(c => ({
+        id: c.created,
+        lifetime: c.deleteOn - c.created,
+        reuseCount: c.reuseDays.length,
+        cohort: c
+    }));
+
+    lifetimes.sort((a, b) => b.lifetime - a.lifetime);
+
+    const top10 = lifetimes.slice(0, 10);
+
+    const worst = top10[0].cohort;
+
+    function buildTimeline(c) {
+        let out = "";
+        const events = [];
+
+        events.push({ day: c.created, type: "Created", exp: c.created + minImmutability + blockGenWindow });
+
+        for (let i = 0; i < c.reuseDays.length; i++) {
+            const d = c.reuseDays[i];
+            const exp = c.expirations[i];
+            events.push({ day: d, type: "Reused", exp });
+        }
+
+        events.push({ day: c.deleteOn, type: "Deleted", exp: null });
+
+        for (const e of events) {
+            if (e.type === "Deleted") {
+                out += `Day ${e.day}: Deleted\n`;
+            } else {
+                out += `Day ${e.day}: ${e.type} → expiration now ${e.exp}\n`;
+            }
+        }
+
+        return out;
     }
 
-    /* -----------------------------
-       SECTION C: ASCII timeline
-       ----------------------------- */
-    function timelineExample() {
-        return "[Created]---M---G---(Reuse)---M---G---(Reuse)---M---G---[DeleteOn]";
-    }
+    const immPlusGen = minImmutability + blockGenWindow;
 
-    /* -----------------------------
-       SECTION D: Effective retention
-       ----------------------------- */
-    const lastReuse = Math.max(
-        0,
-        ...cohorts.flatMap(c => c.reuseDays.length ? [Math.max(...c.reuseDays)] : [])
-    );
+    const genDiagnostic =
+`GEN Window: ${blockGenWindow} days
+Min Immutability: ${minImmutability} days
+Effective extension per reuse: ${immPlusGen} days
+Synthetic interval: ${syntheticInterval} days
 
-    const effectiveRetention = lastReuse + minImmutability + blockGenWindow;
+Because synthetic interval < immutability+GEN:
+→ Every synthetic full reuses all cohorts
+→ Immutability is extended before expiration
+→ No cohort can age out
+→ Storage footprint grows without bound`;
 
-    /* -----------------------------
-       SECTION E: Capacity table
-       ----------------------------- */
+    const rootCause =
+`1. Synthetic interval (${syntheticInterval}) is shorter than immutability+GEN (${immPlusGen})
+2. Therefore every synthetic full reuses all cohorts
+3. Therefore immutability is extended before expiration
+4. Therefore no cohort can expire
+5. Therefore storage footprint grows linearly with days`;
+
+    const fixes =
+`To prevent rollover:
+- Increase synthetic interval to > ${immPlusGen} days
+OR
+- Reduce immutability to < ${syntheticInterval} days
+OR
+- Reduce block generation window to < ${immPlusGen - minImmutability} days`;
+
     function capacityTable() {
-        let out = "Day | Logical(GB) | NewData(GB) | Stored(GB)\n";
+        let out = "Day | Stored(GB) | Δ vs prior | Reason\n";
         out += "--------------------------------------------------\n";
+
+        let last = 0;
         for (let d = 0; d < simDays; d += Math.ceil(simDays / 30)) {
+            const s = dailyStored[d];
+            const delta = s - last;
+            last = s;
+
             out += `${d.toString().padStart(3)} | ` +
-                   `${dailyLogical[d].toFixed(1).padStart(11)} | ` +
-                   `${dailyDelta[d].toFixed(1).padStart(11)} | ` +
-                   `${dailyStored[d].toFixed(1).padStart(10)}\n`;
+                   `${s.toFixed(1).padStart(10)} | ` +
+                   `${delta.toFixed(1).padStart(10)} | ` +
+                   `${dailyReason[d]}\n`;
         }
         return out;
     }
 
     /* -----------------------------
-       SECTION F: Key insights
+       Final Output Assembly
        ----------------------------- */
-    const insights = [
-        `Reused blocks extend immutability by an average of ${avgImmutExt.toFixed(1)} days`,
-        `Synthetic fulls contribute ${((reused / totalCohorts) * 100).toFixed(1)}% of long-tail retention`,
-        `Actual storage footprint peaks at ${(Math.max(...dailyStored) / initialSizeGB).toFixed(2)}x logical size`
-    ];
 
-    /* -----------------------------
-       Assemble final ASCII dashboard
-       ----------------------------- */
     let out = "";
-    out += "============================================================\n";
-    out += "SECTION A: STORAGE OVER TIME (ASCII CHART)\n";
-    out += "============================================================\n";
-    out += chart + "\n\n";
 
-    out += "============================================================\n";
-    out += "SECTION B: BLOCK LIFECYCLE SUMMARY\n";
-    out += "============================================================\n";
-    out += `Total cohorts created: ${totalCohorts}\n`;
-    out += `Cohorts reused:        ${reused}\n`;
-    out += `Longest-lived cohort:  ${longest} days\n`;
-    out += `Avg immutability ext:  ${avgImmutExt.toFixed(1)} days\n`;
-    out += `Max GEN rollover:      ${maxGen} days\n\n`;
+    out += "==================== STORAGE CURVE ====================\n";
+    out += capacityTable() + "\n\n";
 
-    out += "============================================================\n";
-    out += "SECTION C: IMMUTABILITY + RETENTION TIMELINE\n";
-    out += "============================================================\n";
-    out += timelineExample() + "\n\n";
+    out += "==================== TOP 10 LONGEST-LIVED COHORTS ====================\n";
+    for (const t of top10) {
+        out += `Cohort ${t.id}: lived ${t.lifetime} days (reused ${t.reuseCount} times)\n`;
+    }
+    out += "\n";
 
-    out += "============================================================\n";
-    out += "SECTION D: EFFECTIVE RETENTION\n";
-    out += "============================================================\n";
-    out += `Last reuse day:       ${lastReuse}\n`;
-    out += `Effective retention:  ${effectiveRetention} days\n\n`;
+    out += "==================== WORST COHORT TIMELINE ====================\n";
+    out += buildTimeline(worst) + "\n";
 
-    out += "============================================================\n";
-    out += "SECTION E: CAPACITY FORECAST TABLE\n";
-    out += "============================================================\n";
-    out += capacityTable() + "\n";
+    out += "==================== GEN ROLLOVER DIAGNOSTIC ====================\n";
+    out += genDiagnostic + "\n\n";
 
-    out += "============================================================\n";
-    out += "SECTION F: KEY INSIGHTS\n";
-    out += "============================================================\n";
-    insights.forEach(i => out += "- " + i + "\n");
+    out += "==================== ROOT CAUSE ANALYSIS ====================\n";
+    out += rootCause + "\n\n";
+
+    out += "==================== FIX RECOMMENDATIONS ====================\n";
+    out += fixes + "\n";
 
     return out;
 }
