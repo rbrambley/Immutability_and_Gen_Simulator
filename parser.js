@@ -1,9 +1,12 @@
 /* -------------------------------------------------------------
    parser.js
    Minimalist input acquisition + normalization module
+   Debug‑instrumented version (no functional changes)
    ------------------------------------------------------------- */
 
 function parseManualInput() {
+    debugLog("=== parseManualInput() START ===");
+
     const get = id => document.getElementById(id).value.trim();
 
     const initialSizeGB      = parseFloat(get("initialSize"));
@@ -14,6 +17,17 @@ function parseManualInput() {
     const blockGenWindow     = parseInt(get("blockGen"));
     const retention          = parseInt(get("retention"));
     const simDays            = parseInt(get("simDays"));
+
+    debugLog("Manual Input Values:", JSON.stringify({
+        initialSizeGB,
+        dailyChangeRate,
+        annualGrowthRate,
+        syntheticInterval,
+        minImmutability,
+        blockGenWindow,
+        retention,
+        simDays
+    }, null, 2));
 
     const required = [
         ["Initial Logical Size", initialSizeGB],
@@ -28,9 +42,12 @@ function parseManualInput() {
 
     for (const [name, val] of required) {
         if (isNaN(val) || val < 0) {
+            debugLog("ERROR: Missing or invalid manual value:", name);
             return { valid: false, error: `Missing or invalid value: ${name}` };
         }
     }
+
+    debugLog("=== parseManualInput() COMPLETE ===");
 
     return {
         valid: true,
@@ -51,10 +68,15 @@ function parseManualInput() {
    - Accepts messy, multi-line text
    - Extracts values using keyword proximity
    - Normalizes units (GB/TB, %, days)
+   Debug‑instrumented version (no functional changes)
    ------------------------------------------------------------- */
 
 function parseCalculatorInput(text) {
+    debugLog("=== parseCalculatorInput() START ===");
+    debugLog("RAW INPUT:", text);
+
     if (!text || text.trim().length < 5) {
+        debugLog("ERROR: Calculator output empty/short");
         return { valid: false, error: "Calculator output is empty or too short." };
     }
 
@@ -67,10 +89,13 @@ function parseCalculatorInput(text) {
                 const slice = lower.substring(idx, idx + 80);
                 const match = slice.match(/([\d,.]+)/);
                 if (match) {
-                    return parseFloat(match[1].replace(/,/g, ""));
+                    const val = parseFloat(match[1].replace(/,/g, ""));
+                    debugLog(`extractNumber(${key}) →`, val);
+                    return val;
                 }
             }
         }
+        debugLog(`extractNumber MISS for:`, keywords.join(", "));
         return fallback;
     }
 
@@ -80,9 +105,14 @@ function parseCalculatorInput(text) {
             if (idx !== -1) {
                 const slice = lower.substring(idx, idx + 80);
                 const match = slice.match(/([\d,.]+)\s*%/);
-                if (match) return parseFloat(match[1]) / 100;
+                if (match) {
+                    const val = parseFloat(match[1]) / 100;
+                    debugLog(`extractPercent(${key}) →`, val);
+                    return val;
+                }
             }
         }
+        debugLog(`extractPercent MISS for:`, keys.join(", "));
         return null;
     }
 
@@ -92,16 +122,22 @@ function parseCalculatorInput(text) {
             if (idx !== -1) {
                 const slice = lower.substring(idx, idx + 80);
                 const match = slice.match(/(\d+)\s*day/);
-                if (match) return parseInt(match[1]);
+                if (match) {
+                    const val = parseInt(match[1]);
+                    debugLog(`extractDays(${key}) →`, val);
+                    return val;
+                }
             }
         }
+        debugLog(`extractDays MISS for:`, keys.join(", "));
         return null;
     }
 
     function normalizeSize(val) {
         if (!val) return null;
-        if (lower.includes("tb")) return val * 1024;
-        return val;
+        const result = lower.includes("tb") ? val * 1024 : val;
+        debugLog("normalizeSize:", val, "→", result);
+        return result;
     }
 
     const initialSizeGB     = normalizeSize(extractNumber(["source size", "initial size", "logical size"]));
@@ -112,6 +148,17 @@ function parseCalculatorInput(text) {
     const blockGenWindow    = extractDays(["block generation", "generation window"]);
     const syntheticInterval = extractDays(["synthetic", "synthetic full"]);
     const simDays           = 365;
+
+    debugLog("Extracted Values:", JSON.stringify({
+        initialSizeGB,
+        dailyChangeRate,
+        annualGrowthRate,
+        retention,
+        minImmutability,
+        blockGenWindow,
+        syntheticInterval,
+        simDays
+    }, null, 2));
 
     const required = {
         initialSizeGB,
@@ -125,9 +172,12 @@ function parseCalculatorInput(text) {
 
     for (const [name, val] of Object.entries(required)) {
         if (val === null || isNaN(val)) {
+            debugLog("ERROR: Missing required calculator value:", name);
             return { valid: false, error: `Could not extract required value: ${name}` };
         }
     }
+
+    debugLog("=== parseCalculatorInput() COMPLETE ===");
 
     return {
         valid: true,
