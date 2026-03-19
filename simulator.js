@@ -1,9 +1,9 @@
 /* -------------------------------------------------------------
-   simulator.js — GFS-aware, debug-instrumented
+   simulator.js — GFS-aware, diagnostic, debug-instrumented
    - Models daily backups with synthetic fulls
    - Flags GFS points (weekly/monthly/yearly) as synthetic fulls
    - Approximates GFS retention using counts
-   - Uses parser.js config (incl. gfsDailies/Weeklies/Monthlies/Yearlies)
+   - Provides rollover detection, GFS impact, and retention pressure views
    ------------------------------------------------------------- */
 
 function runSimulator(cfg) {
@@ -27,6 +27,10 @@ function runSimulator(cfg) {
             this.isGfsWeekly = false;
             this.isGfsMonthly = false;
             this.isGfsYearly = false;
+
+            this.baseDeleteOn = null;
+            this.gfsDeleteOn = null;
+            this.deleteDriver = "base"; // "base" or "gfs"
         }
     }
 
@@ -38,6 +42,7 @@ function runSimulator(cfg) {
     const dailyLogical = [];
     const dailyDelta = [];
     const dailyReason = [];
+    const dailyExpiredCount = [];
 
     const {
         initialSizeGB,
@@ -80,7 +85,7 @@ function runSimulator(cfg) {
         return logicalSize(day) * dailyChangeRate;
     }
 
-    function baseDeleteOn(c) {
+    function computeBaseDeleteOn(c) {
         if (c.reuseDays.length === 0) {
             const rpRemove = c.created + retention;
             const exp = c.created + minImmutability + blockGenWindow;
@@ -93,7 +98,7 @@ function runSimulator(cfg) {
         return Math.max(rpRemove, expLast);
     }
 
-    function applyGfsRetention(c) {
+    function computeGfsExtension(c) {
         let gfsExtension = 0;
 
         if (c.isGfsWeekly && gfsWeeklies && gfsWeeklies > 0) {
@@ -106,15 +111,24 @@ function runSimulator(cfg) {
             gfsExtension = Math.max(gfsExtension, gfsYearlies * 365);
         }
 
-        if (gfsExtension > 0) {
-            const gfsDelete = c.created + gfsExtension;
-            c.deleteOn = Math.max(c.deleteOn, gfsDelete);
-        }
+        return gfsExtension;
     }
 
     function updateDeleteOn(c) {
-        c.deleteOn = baseDeleteOn(c);
-        applyGfsRetention(c);
+        const base = computeBaseDeleteOn(c);
+        c.baseDeleteOn = base;
+        c.deleteOn = base;
+        c.deleteDriver = "base";
+
+        const ext = computeGfsExtension(c);
+        if (ext > 0) {
+            const gfsDel = c.created + ext;
+            c.gfsDeleteOn = gfsDel;
+            if (gfsDel > c.deleteOn) {
+                c.deleteOn = gfsDel;
+                c.deleteDriver = "gfs";
+            }
+        }
     }
 
     function isWeeklyGfsDay(day) {
@@ -161,6 +175,7 @@ function runSimulator(cfg) {
             }
 
             cohorts.push(full);
+            dailyReason.push("Synthetic full + reuse");
             debugLog(
                 `  Synthetic full created cohort: created=${day} size=${L.toFixed(2)} ` +
                 `GFS[d=${full.isGfsDaily},w=${full.isGfsWeekly},m=${full.isGfsMonthly},y=${full.isGfsYearly}]`
@@ -173,8 +188,6 @@ function runSimulator(cfg) {
                     debugLog(`  Reuse event: cohort=${c.created} newExp=${c.expirations.at(-1)}`);
                 }
             }
-
-            dailyReason.push("Synthetic full + reuse");
         } else {
             const inc = new Cohort(day, D, "inc");
             cohorts.push(inc);
@@ -185,12 +198,15 @@ function runSimulator(cfg) {
         for (const c of cohorts) updateDeleteOn(c);
 
         let stored = 0;
+        let expiredToday = 0;
         for (const c of cohorts) {
             if (day >= c.created && day < c.deleteOn) stored += c.sizeGB;
+            if (c.deleteOn === day) expiredToday++;
         }
         dailyStored.push(stored);
+        dailyExpiredCount.push(expiredToday);
 
-        debugLog(`  Stored=${stored.toFixed(2)} cohorts=${cohorts.length}`);
+        debugLog(`  Stored=${stored.toFixed(2)} cohorts=${cohorts.length} expiredToday=${expiredToday}`);
     }
 
     /* -----------------------------
@@ -213,6 +229,7 @@ function runSimulator(cfg) {
             monthly: c.isGfsMonthly,
             yearly: c.isGfsYearly
         },
+        driver: c.deleteDriver,
         cohort: c
     }));
 
@@ -232,7 +249,8 @@ function runSimulator(cfg) {
             weekly: worst.isGfsWeekly,
             monthly: worst.isGfsMonthly,
             yearly: worst.isGfsYearly
-        }
+        },
+        driver: worst.deleteDriver
     }, null, 2));
 
     function buildTimeline(c) {
@@ -254,7 +272,7 @@ function runSimulator(cfg) {
 
         return events.map(e =>
             e.type === "Deleted"
-                ? `Day ${e.day}: Deleted`
+                ? `Day ${e.day}: Deleted (driver=${c.deleteDriver})`
                 : `Day ${e.day}: ${e.type} → expiration now ${e.exp}`
         ).join("\n");
     }
@@ -280,18 +298,6 @@ If synthetic interval < immutability+GEN:
 4. Therefore no cohort can expire
 5. Therefore storage footprint grows linearly with days`;
 
-    const fixes =
-`To prevent rollover:
-- Increase synthetic interval to > ${immPlusGen} days
-OR
-- Reduce immutability to < ${syntheticInterval} days
-OR
-- Reduce block generation window to < ${immPlusGen - minImmutability} days
-
-GFS considerations:
-- Higher GFS counts (weekly/monthly/yearly) extend retention of flagged fulls
-- This increases long-term stored capacity even if base retention is short`;
-
     function capacityTable() {
         let out = "Day | Stored(GB) | Δ vs prior | Reason\n";
         out += "--------------------------------------------------\n";
@@ -313,6 +319,155 @@ GFS considerations:
     }
 
     /* -----------------------------
+       Intelligent FIX RECOMMENDATIONS
+       ----------------------------- */
+
+    function generateFixRecommendations() {
+        let out = "";
+
+        const genRolloverLikely = syntheticInterval < immPlusGen;
+        const anyExpired = cohorts.some(c => c.deleteOn <= simDays);
+        const finalStored = dailyStored[dailyStored.length - 1];
+        const midStored = dailyStored[Math.floor(dailyStored.length / 2)];
+        const linearGrowth = finalStored > midStored * 1.5;
+        const gfsCounts = (gfsWeeklies || 0) + (gfsMonthlies || 0) + (gfsYearlies || 0);
+        const gfsDominant = gfsCounts > retention;
+
+        out += "==================== FIX RECOMMENDATIONS ====================\n";
+
+        if (genRolloverLikely) {
+            out += `GEN rollover detected: synthetic interval (${syntheticInterval} days) is shorter than immutability+GEN (${immPlusGen} days).\n`;
+            out += "To prevent GEN rollover:\n";
+            out += `- Increase synthetic interval to > ${immPlusGen} days\n`;
+            out += `- OR reduce immutability to < ${syntheticInterval} days\n`;
+            out += `- OR reduce block generation window to < ${immPlusGen - minImmutability} days\n\n`;
+        } else {
+            out += "No GEN rollover detected — synthetic interval is long enough relative to immutability+GEN.\n\n";
+        }
+
+        if (!anyExpired) {
+            out += "Warning: No cohorts expired during the simulation.\n";
+            out += "This indicates retention or immutability settings are preventing aging out of restore points.\n\n";
+        } else {
+            out += "Cohort expiration observed — retention and immutability allow aging out of restore points.\n\n";
+        }
+
+        if (linearGrowth) {
+            out += "Storage footprint is growing linearly.\n";
+            out += "This typically indicates:\n";
+            out += "- Synthetic interval too short\n";
+            out += "- Immutability+GEN window too long\n";
+            out += "- GFS retention extending full backups\n\n";
+        } else {
+            out += "Storage footprint shows plateauing behavior — rollover is functioning.\n\n";
+        }
+
+        if (gfsDominant) {
+            out += "GFS retention is the dominant driver of long-term storage.\n";
+            out += "Weekly/Monthly/Yearly GFS points extend retention beyond base policy.\n";
+            out += "To reduce long-term storage:\n";
+            out += "- Reduce weekly/monthly/yearly GFS counts\n";
+            out += "- OR increase synthetic interval to reduce number of fulls created\n\n";
+        } else {
+            out += "GFS retention is not the dominant driver — base retention or GEN behavior is primary.\n\n";
+        }
+
+        return out;
+    }
+
+    /* -----------------------------
+       Rollover Event Timeline
+       ----------------------------- */
+
+    function generateRolloverTimeline() {
+        let out = "==================== ROLLOVER EVENT TIMELINE ====================\n";
+
+        let lastStored = dailyStored[0];
+        let firstNoExpireDay = null;
+        let lastExpireDay = null;
+
+        for (let d = 0; d < simDays; d++) {
+            if (dailyExpiredCount[d] > 0) lastExpireDay = d;
+            if (dailyExpiredCount[d] === 0 && firstNoExpireDay === null && d > 0) {
+                firstNoExpireDay = d;
+            }
+            lastStored = dailyStored[d];
+        }
+
+        if (lastExpireDay === null) {
+            out += "No expiration events occurred during the simulation.\n";
+            out += "Rollover never engaged — retention/immutability/GFS kept all cohorts alive.\n";
+        } else {
+            out += `Last expiration event occurred on day ${lastExpireDay}.\n`;
+            if (firstNoExpireDay !== null && firstNoExpireDay > lastExpireDay) {
+                out += `No further expirations after day ${firstNoExpireDay} — rollover effectively stopped.\n`;
+            } else {
+                out += "Expirations continued throughout the simulation window.\n";
+            }
+        }
+
+        out += "\n";
+        return out;
+    }
+
+    /* -----------------------------
+       GFS Impact Breakdown
+       ----------------------------- */
+
+    function generateGfsImpact() {
+        let out = "==================== GFS IMPACT BREAKDOWN ====================\n";
+
+        const weekly = cohorts.filter(c => c.isGfsWeekly);
+        const monthly = cohorts.filter(c => c.isGfsMonthly);
+        const yearly = cohorts.filter(c => c.isGfsYearly);
+
+        function summarize(list, label) {
+            if (list.length === 0) {
+                out += `${label}: none\n`;
+                return;
+            }
+            const avgLifetime = list.reduce((s, c) => s + (c.deleteOn - c.created), 0) / list.length;
+            const avgSize = list.reduce((s, c) => s + c.sizeGB, 0) / list.length;
+            out += `${label}: count=${list.length}, avgLifetime=${avgLifetime.toFixed(1)} days, avgSize=${avgSize.toFixed(1)} GB\n`;
+        }
+
+        summarize(weekly, "Weekly GFS fulls");
+        summarize(monthly, "Monthly GFS fulls");
+        summarize(yearly, "Yearly GFS fulls");
+
+        out += "\n";
+        return out;
+    }
+
+    /* -----------------------------
+       Retention Pressure Heatmap
+       ----------------------------- */
+
+    function generateRetentionHeatmap() {
+        let out = "==================== RETENTION PRESSURE HEATMAP ====================\n";
+
+        const baseDriven = cohorts.filter(c => c.deleteDriver === "base");
+        const gfsDriven = cohorts.filter(c => c.deleteDriver === "gfs");
+
+        out += `Base policy / GEN-driven cohorts: ${baseDriven.length}\n`;
+        out += `GFS-driven cohorts: ${gfsDriven.length}\n\n`;
+
+        out += "Sample GFS-driven cohorts (up to 10):\n";
+        const sample = gfsDriven.slice(0, 10);
+        if (sample.length === 0) {
+            out += "  (none)\n";
+        } else {
+            for (const c of sample) {
+                out += `  Cohort ${c.created}: lifetime=${(c.deleteOn - c.created)} days, ` +
+                       `GFS[d=${c.isGfsDaily},w=${c.isGfsWeekly},m=${c.isGfsMonthly},y=${c.isGfsYearly}]\n`;
+            }
+        }
+
+        out += "\n";
+        return out;
+    }
+
+    /* -----------------------------
        Final Output Assembly
        ----------------------------- */
 
@@ -326,7 +481,7 @@ GFS considerations:
     out += "==================== TOP 10 LONGEST-LIVED COHORTS ====================\n";
     for (const t of top10) {
         out += `Cohort ${t.id}: lived ${t.lifetime} days (reused ${t.reuseCount} times, kind=${t.kind}, ` +
-               `GFS[d=${t.gfs.daily},w=${t.gfs.weekly},m=${t.gfs.monthly},y=${t.gfs.yearly}])\n`;
+               `GFS[d=${t.gfs.daily},w=${t.gfs.weekly},m=${t.gfs.monthly},y=${t.gfs.yearly}], driver=${t.driver})\n`;
     }
     out += "\n";
 
@@ -339,8 +494,10 @@ GFS considerations:
     out += "==================== ROOT CAUSE ANALYSIS ====================\n";
     out += rootCause + "\n\n";
 
-    out += "==================== FIX RECOMMENDATIONS ====================\n";
-    out += fixes + "\n";
+    out += generateFixRecommendations();
+    out += generateRolloverTimeline();
+    out += generateGfsImpact();
+    out += generateRetentionHeatmap();
 
     return out;
 }
