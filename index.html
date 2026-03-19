@@ -22,6 +22,40 @@
             border: 1px solid #ccc;
             overflow-x: auto;
         }
+
+        /* -------------------------
+           Debug Panel (Right Side)
+        ------------------------- */
+        #debugLog {
+            position: fixed;
+            top: 50px;
+            right: 0;
+            width: 350px;
+            height: calc(100% - 60px);
+            background: #111;
+            color: #0f0;
+            padding: 10px;
+            border-left: 2px solid #444;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            display: none;
+            z-index: 9999;
+        }
+
+        /* -------------------------
+           Debug Toggle Button (Top Right)
+        ------------------------- */
+        #toggleDebug {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            z-index: 10000;
+            padding: 6px 12px;
+            background: #333;
+            color: #fff;
+            border: 1px solid #555;
+            cursor: pointer;
+        }
     </style>
 </head>
 
@@ -71,13 +105,40 @@
 
 <button onclick="runSimulation()">Run Simulation</button>
 
+<!-- Debug Toggle Button -->
+<button id="toggleDebug">Enable Debug</button>
+
 <h2>Output</h2>
 <pre id="output">(results will appear here)</pre>
+
+<!-- Debug Panel -->
+<pre id="debugLog"></pre>
 
 <script src="parser.js"></script>
 <script src="simulator.js"></script>
 
 <script>
+/* -------------------------
+   Debug Panel Logic
+------------------------- */
+let DEBUG_ENABLED = false;
+
+document.getElementById("toggleDebug").onclick = () => {
+    DEBUG_ENABLED = !DEBUG_ENABLED;
+    document.getElementById("debugLog").style.display = DEBUG_ENABLED ? "block" : "none";
+    document.getElementById("toggleDebug").textContent =
+        DEBUG_ENABLED ? "Disable Debug" : "Enable Debug";
+};
+
+function debugLog(...args) {
+    if (!DEBUG_ENABLED) return;
+    const el = document.getElementById("debugLog");
+    el.textContent += args.join(" ") + "\n";
+}
+
+/* -------------------------
+   Existing Mode Toggle Logic
+------------------------- */
 document.querySelectorAll("input[name='mode']").forEach(r => {
     r.addEventListener("change", () => {
         const manual = document.querySelector("input[name='mode'][value='manual']").checked;
@@ -86,6 +147,9 @@ document.querySelectorAll("input[name='mode']").forEach(r => {
     });
 });
 
+/* -------------------------
+   Existing Run Simulation Logic
+------------------------- */
 function runSimulation() {
     const mode = document.querySelector("input[name='mode']:checked").value;
 
@@ -93,10 +157,14 @@ function runSimulation() {
     if (mode === "manual") {
         config = parseManualInput();
     } else {
-        config = parseCalculatorInput(document.getElementById("calcInput").value);
+        const text = document.getElementById("calcInput").value;
+        debugLog("=== NEW RUN ===");
+        debugLog("RAW INPUT:", text);
+        config = parseCalculatorInput(text);
     }
 
     if (!config.valid) {
+        debugLog("PARSER ERROR:", config.error);
         document.getElementById("output").textContent = "Input error:\n" + config.error;
         return;
     }
@@ -108,3 +176,4 @@ function runSimulation() {
 
 </body>
 </html>
+
