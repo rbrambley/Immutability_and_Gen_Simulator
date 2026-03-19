@@ -3,7 +3,7 @@
    Full calculator-compatible, debug-instrumented parser
    - Handles manual input
    - Handles full Veeam calculator output (incl. GFS-style fields)
-   - Additive only: simulator interface preserved
+   - Synthetic interval is OPTIONAL (index.html injects it)
    ------------------------------------------------------------- */
 
 /* =========================
@@ -186,14 +186,13 @@ function parseCalculatorInput(text) {
 
     const blockGenWindow = extractDays(["block generation", "generation window"]);
 
+    // syntheticInterval is OPTIONAL — index.html injects it
     const syntheticInterval = extractDays(["synthetic full interval", "synthetic full", "synthetic"]);
 
     /* ---------- retention / GFS ---------- */
 
-    // Simple base retention (first number near "retention" or "restore points")
     const baseRetention = extractNumber(["retention", "restore points"]);
 
-    // GFS-style counts
     const dailies = extractNumber(["dailies", "daily backups"]);
     const weeklies = extractNumber(["weeklies", "weekly backups"]);
     const monthlies = extractNumber(["monthlies", "monthly backups"]);
@@ -245,7 +244,6 @@ function parseCalculatorInput(text) {
 
     const directToObject = extractBoolean(["direct to object storage", "direct to object"]);
 
-    // Vault flags: first occurrence = performance, second = capacity (per your sample)
     let useVaultPerformance = null;
     let useVaultCapacity = null;
     {
@@ -276,7 +274,6 @@ function parseCalculatorInput(text) {
 
     const archiveTierEnabled = extractBoolean(["archive tier?"]);
     const archiveMovePeriodDays = (() => {
-        // second "move period" after "archive tier" block
         const key = "archive tier";
         const idx = lower.indexOf(key);
         if (idx === -1) return null;
@@ -334,19 +331,17 @@ function parseCalculatorInput(text) {
         initialSizeGB,
         dailyChangeRate,
         annualGrowthRate,
-        syntheticInterval,
+        syntheticInterval,   // may be null — allowed
         minImmutability,
         blockGenWindow,
         retention,
         simDays,
 
-        // GFS components (for future simulator upgrades)
         gfsDailies: dailies,
         gfsWeeklies: weeklies,
         gfsMonthlies: monthlies,
         gfsYearlies: yearlies,
 
-        // Extra calculator fields (not all used by current simulator)
         compressBy,
         backupWindowHours,
         directToObject,
@@ -365,13 +360,12 @@ function parseCalculatorInput(text) {
 
     debugLog("Extracted Values:", JSON.stringify(cfg, null, 2));
 
-    /* ---------- required fields for current simulator ---------- */
+    /* ---------- required fields (syntheticInterval OPTIONAL) ---------- */
 
     const required = {
         initialSizeGB,
         dailyChangeRate,
         annualGrowthRate,
-        syntheticInterval,
         minImmutability,
         blockGenWindow,
         retention
@@ -383,6 +377,8 @@ function parseCalculatorInput(text) {
             return { valid: false, error: `Could not extract required value: ${name}` };
         }
     }
+
+    debugLog("syntheticInterval is optional — will be injected by index.html if missing.");
 
     debugLog("=== parseCalculatorInput() COMPLETE ===");
     return cfg;
