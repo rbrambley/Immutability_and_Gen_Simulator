@@ -23,9 +23,7 @@
             overflow-x: auto;
         }
 
-        /* -------------------------
-           Debug Panel (Right Side)
-        ------------------------- */
+        /* Debug Panel (Right Side) */
         #debugLog {
             position: fixed;
             top: 50px;
@@ -42,9 +40,7 @@
             z-index: 9999;
         }
 
-        /* -------------------------
-           Debug Toggle Button (Top Right)
-        ------------------------- */
+        /* Debug Toggle Button */
         #toggleDebug {
             position: fixed;
             top: 10px;
@@ -55,6 +51,19 @@
             color: #fff;
             border: 1px solid #555;
             cursor: pointer;
+        }
+
+        /* Calculator synthetic interval field */
+        #calcSyntheticWrapper {
+            margin-top: 10px;
+            width: 300px;
+        }
+        #calcSyntheticWrapper label {
+            display: block;
+            margin-bottom: 4px;
+        }
+        #calcSyntheticInterval {
+            width: 100%;
         }
     </style>
 </head>
@@ -101,6 +110,12 @@
 <div id="calcForm" class="section" style="display:none;">
     <h3>Paste Veeam Calculator Output</h3>
     <textarea id="calcInput" rows="12"></textarea>
+
+    <!-- NEW FIELD: Synthetic Interval for Calculator Mode -->
+    <div id="calcSyntheticWrapper">
+        <label for="calcSyntheticInterval">Synthetic Full Interval (days)</label>
+        <input id="calcSyntheticInterval" type="number" value="7">
+    </div>
 </div>
 
 <button onclick="runSimulation()">Run Simulation</button>
@@ -118,9 +133,7 @@
 <script src="simulator.js"></script>
 
 <script>
-/* -------------------------
-   Debug Panel Logic
-------------------------- */
+/* Debug Panel Logic */
 let DEBUG_ENABLED = false;
 
 document.getElementById("toggleDebug").onclick = () => {
@@ -136,9 +149,7 @@ function debugLog(...args) {
     el.textContent += args.join(" ") + "\n";
 }
 
-/* -------------------------
-   Existing Mode Toggle Logic
-------------------------- */
+/* Mode Toggle Logic */
 document.querySelectorAll("input[name='mode']").forEach(r => {
     r.addEventListener("change", () => {
         const manual = document.querySelector("input[name='mode'][value='manual']").checked;
@@ -147,9 +158,7 @@ document.querySelectorAll("input[name='mode']").forEach(r => {
     });
 });
 
-/* -------------------------
-   Existing Run Simulation Logic
-------------------------- */
+/* Run Simulation */
 function runSimulation() {
     const mode = document.querySelector("input[name='mode']:checked").value;
 
@@ -160,7 +169,15 @@ function runSimulation() {
         const text = document.getElementById("calcInput").value;
         debugLog("=== NEW RUN ===");
         debugLog("RAW INPUT:", text);
+
         config = parseCalculatorInput(text);
+
+        // Inject synthetic interval from calculator field
+        const calcInterval = parseInt(document.getElementById("calcSyntheticInterval").value);
+        if (!isNaN(calcInterval) && calcInterval > 0) {
+            config.syntheticInterval = calcInterval;
+            debugLog("Injected syntheticInterval from calculator field:", calcInterval);
+        }
     }
 
     if (!config.valid) {
@@ -176,4 +193,3 @@ function runSimulation() {
 
 </body>
 </html>
-
