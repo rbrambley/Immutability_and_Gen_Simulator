@@ -1,8 +1,14 @@
 /* -------------------------------------------------------------
    parser.js
-   Minimalist input acquisition + normalization module
-   Debug‑instrumented version (no functional changes)
+   Full calculator-compatible, debug-instrumented parser
+   - Handles manual input
+   - Handles full Veeam calculator output (incl. GFS-style fields)
+   - Additive only: simulator interface preserved
    ------------------------------------------------------------- */
+
+/* =========================
+   MANUAL INPUT PARSER
+   ========================= */
 
 function parseManualInput() {
     debugLog("=== parseManualInput() START ===");
@@ -17,17 +23,6 @@ function parseManualInput() {
     const blockGenWindow     = parseInt(get("blockGen"));
     const retention          = parseInt(get("retention"));
     const simDays            = parseInt(get("simDays"));
-
-    debugLog("Manual Input Values:", JSON.stringify({
-        initialSizeGB,
-        dailyChangeRate,
-        annualGrowthRate,
-        syntheticInterval,
-        minImmutability,
-        blockGenWindow,
-        retention,
-        simDays
-    }, null, 2));
 
     const required = [
         ["Initial Logical Size", initialSizeGB],
@@ -47,9 +42,7 @@ function parseManualInput() {
         }
     }
 
-    debugLog("=== parseManualInput() COMPLETE ===");
-
-    return {
+    const cfg = {
         valid: true,
         initialSizeGB,
         dailyChangeRate,
@@ -60,16 +53,16 @@ function parseManualInput() {
         retention,
         simDays
     };
+
+    debugLog("Manual Input Values:", JSON.stringify(cfg, null, 2));
+    debugLog("=== parseManualInput() COMPLETE ===");
+    return cfg;
 }
 
 
-/* -------------------------------------------------------------
-   Calculator Output Parser
-   - Accepts messy, multi-line text
-   - Extracts values using keyword proximity
-   - Normalizes units (GB/TB, %, days)
-   Debug‑instrumented version (no functional changes)
-   ------------------------------------------------------------- */
+/* =========================
+   CALCULATOR OUTPUT PARSER
+   ========================= */
 
 function parseCalculatorInput(text) {
     debugLog("=== parseCalculatorInput() START ===");
@@ -82,11 +75,13 @@ function parseCalculatorInput(text) {
 
     const lower = text.toLowerCase();
 
+    /* ---------- helpers ---------- */
+
     function extractNumber(keywords, fallback = null) {
         for (const key of keywords) {
             const idx = lower.indexOf(key);
             if (idx !== -1) {
-                const slice = lower.substring(idx, idx + 80);
+                const slice = lower.substring(idx, idx + 120);
                 const match = slice.match(/([\d,.]+)/);
                 if (match) {
                     const val = parseFloat(match[1].replace(/,/g, ""));
@@ -103,7 +98,7 @@ function parseCalculatorInput(text) {
         for (const key of keys) {
             const idx = lower.indexOf(key);
             if (idx !== -1) {
-                const slice = lower.substring(idx, idx + 80);
+                const slice = lower.substring(idx, idx + 120);
                 const match = slice.match(/([\d,.]+)\s*%/);
                 if (match) {
                     const val = parseFloat(match[1]) / 100;
@@ -120,7 +115,7 @@ function parseCalculatorInput(text) {
         for (const key of keys) {
             const idx = lower.indexOf(key);
             if (idx !== -1) {
-                const slice = lower.substring(idx, idx + 80);
+                const slice = lower.substring(idx, idx + 120);
                 const match = slice.match(/(\d+)\s*day/);
                 if (match) {
                     const val = parseInt(match[1]);
@@ -133,41 +128,253 @@ function parseCalculatorInput(text) {
         return null;
     }
 
-    function normalizeSize(val) {
-        if (!val) return null;
-        const result = lower.includes("tb") ? val * 1024 : val;
-        debugLog("normalizeSize:", val, "→", result);
+    function extractYears(keys) {
+        for (const key of keys) {
+            const idx = lower.indexOf(key);
+            if (idx !== -1) {
+                const slice = lower.substring(idx, idx + 120);
+                const match = slice.match(/(\d+)\s*year/);
+                if (match) {
+                    const val = parseInt(match[1]);
+                    debugLog(`extractYears(${key}) →`, val);
+                    return val;
+                }
+            }
+        }
+        debugLog(`extractYears MISS for:`, keys.join(", "));
+        return null;
+    }
+
+    function normalizeSizeGB(val) {
+        if (!val && val !== 0) return null;
+        let result = val;
+        if (lower.includes("tb")) result = val * 1024;
+        debugLog("normalizeSizeGB:", val, "→", result);
         return result;
     }
 
-    const initialSizeGB     = normalizeSize(extractNumber(["source size", "initial size", "logical size"]));
-    const dailyChangeRate   = extractPercent(["daily change", "change rate"]);
-    const annualGrowthRate  = extractPercent(["annual growth", "yearly growth"]);
-    const retention         = extractNumber(["retention", "restore points"]);
-    const minImmutability   = extractDays(["immutability", "immutable"]);
-    const blockGenWindow    = extractDays(["block generation", "generation window"]);
-    const syntheticInterval = extractDays(["synthetic", "synthetic full"]);
-    const simDays           = 365;
+    function extractBoolean(keys) {
+        for (const key of keys) {
+            const idx = lower.indexOf(key);
+            if (idx !== -1) {
+                const slice = lower.substring(idx, idx + 80);
+                if (slice.includes("true")) {
+                    debugLog(`extractBoolean(${key}) → true`);
+                    return true;
+                }
+                if (slice.includes("false")) {
+                    debugLog(`extractBoolean(${key}) → false`);
+                    return false;
+                }
+            }
+        }
+        debugLog(`extractBoolean MISS for:`, keys.join(", "));
+        return null;
+    }
 
-    debugLog("Extracted Values:", JSON.stringify({
+    /* ---------- core values ---------- */
+
+    const initialSizeGB = normalizeSizeGB(
+        extractNumber(["source data", "source size", "initial size", "logical size"])
+    );
+
+    const dailyChangeRate = extractPercent(["daily change", "change rate"]);
+
+    const annualGrowthRate = extractPercent(["growth rate", "annual growth", "yearly growth"]);
+
+    const minImmutability = extractDays(["immutability", "immutable"]);
+
+    const blockGenWindow = extractDays(["block generation", "generation window"]);
+
+    const syntheticInterval = extractDays(["synthetic full interval", "synthetic full", "synthetic"]);
+
+    /* ---------- retention / GFS ---------- */
+
+    // Simple base retention (first number near "retention" or "restore points")
+    const baseRetention = extractNumber(["retention", "restore points"]);
+
+    // GFS-style counts
+    const dailies = extractNumber(["dailies", "daily backups"]);
+    const weeklies = extractNumber(["weeklies", "weekly backups"]);
+    const monthlies = extractNumber(["monthlies", "monthly backups"]);
+    const yearlies = extractNumber(["yearlies", "yearly backups"]);
+
+    let retention = baseRetention;
+    if (!isNaN(dailies) || !isNaN(weeklies) || !isNaN(monthlies) || !isNaN(yearlies)) {
+        const d = isNaN(dailies) ? 0 : dailies;
+        const w = isNaN(weeklies) ? 0 : weeklies;
+        const m = isNaN(monthlies) ? 0 : monthlies;
+        const y = isNaN(yearlies) ? 0 : yearlies;
+        retention = d + w + m + y;
+        debugLog("GFS retention components:", JSON.stringify({ d, w, m, y, total: retention }, null, 2));
+    }
+
+    /* ---------- forecast / sim length ---------- */
+
+    const forecastYears = extractYears(["forecast period", "forecast"]);
+    let simDays = 365;
+    if (!isNaN(forecastYears) && forecastYears > 0) {
+        simDays = forecastYears * 365;
+    }
+    debugLog("Forecast years → simDays:", forecastYears, "→", simDays);
+
+    /* ---------- compression ---------- */
+
+    const compressBy = extractPercent(["compress by", "compression"]);
+
+    /* ---------- backup window ---------- */
+
+    const backupWindowHours = (() => {
+        const idx = lower.indexOf("backup window");
+        if (idx === -1) {
+            debugLog("backup window MISS");
+            return null;
+        }
+        const slice = lower.substring(idx, idx + 80);
+        const match = slice.match(/(\d+)\s*hour/);
+        if (match) {
+            const val = parseInt(match[1]);
+            debugLog("backup window hours →", val);
+            return val;
+        }
+        debugLog("backup window parse MISS");
+        return null;
+    })();
+
+    /* ---------- object / vault / copy / move / archive ---------- */
+
+    const directToObject = extractBoolean(["direct to object storage", "direct to object"]);
+
+    // Vault flags: first occurrence = performance, second = capacity (per your sample)
+    let useVaultPerformance = null;
+    let useVaultCapacity = null;
+    {
+        const key = "use veeam data cloud vault";
+        let idx = lower.indexOf(key);
+        if (idx !== -1) {
+            const slice1 = lower.substring(idx, idx + 80);
+            if (slice1.includes("true")) useVaultPerformance = true;
+            else if (slice1.includes("false")) useVaultPerformance = false;
+            debugLog("useVaultPerformance →", useVaultPerformance);
+
+            const idx2 = lower.indexOf(key, idx + key.length);
+            if (idx2 !== -1) {
+                const slice2 = lower.substring(idx2, idx2 + 80);
+                if (slice2.includes("true")) useVaultCapacity = true;
+                else if (slice2.includes("false")) useVaultCapacity = false;
+                debugLog("useVaultCapacity →", useVaultCapacity);
+            }
+        } else {
+            debugLog("Vault flags MISS");
+        }
+    }
+
+    const copyPolicy = extractBoolean(["copy policy"]);
+    const movePolicy = extractBoolean(["move policy"]);
+
+    const movePeriodDays = extractNumber(["move period"]);
+
+    const archiveTierEnabled = extractBoolean(["archive tier?"]);
+    const archiveMovePeriodDays = (() => {
+        // second "move period" after "archive tier" block
+        const key = "archive tier";
+        const idx = lower.indexOf(key);
+        if (idx === -1) return null;
+        const after = lower.indexOf("move period", idx);
+        if (after === -1) return null;
+        const slice = lower.substring(after, after + 80);
+        const match = slice.match(/(\d+)/);
+        if (match) {
+            const val = parseInt(match[1]);
+            debugLog("archiveMovePeriodDays →", val);
+            return val;
+        }
+        return null;
+    })();
+
+    /* ---------- immutability (perf / capacity) ---------- */
+
+    const performanceTierImmutable = extractBoolean(["performance tier immutable"]);
+    const capacityTierImmutable   = extractBoolean(["capacity tier immutable"]);
+
+    const performanceTierImmutabilityDays = (() => {
+        const key = "performance tier immutable";
+        const idx = lower.indexOf(key);
+        if (idx === -1) return null;
+        const slice = lower.substring(idx, idx + 160);
+        const match = slice.match(/immutability period\s+(\d+)\s*day/);
+        if (match) {
+            const val = parseInt(match[1]);
+            debugLog("performanceTierImmutabilityDays →", val);
+            return val;
+        }
+        debugLog("performanceTierImmutabilityDays MISS");
+        return null;
+    })();
+
+    const capacityTierImmutabilityDays = (() => {
+        const key = "capacity tier immutable";
+        const idx = lower.indexOf(key);
+        if (idx === -1) return null;
+        const slice = lower.substring(idx, idx + 160);
+        const match = slice.match(/immutability period\s+(\d+)\s*day/);
+        if (match) {
+            const val = parseInt(match[1]);
+            debugLog("capacityTierImmutabilityDays →", val);
+            return val;
+        }
+        debugLog("capacityTierImmutabilityDays MISS");
+        return null;
+    })();
+
+    /* ---------- assemble config ---------- */
+
+    const cfg = {
+        valid: true,
         initialSizeGB,
         dailyChangeRate,
         annualGrowthRate,
-        retention,
+        syntheticInterval,
         minImmutability,
         blockGenWindow,
-        syntheticInterval,
-        simDays
-    }, null, 2));
+        retention,
+        simDays,
+
+        // GFS components (for future simulator upgrades)
+        gfsDailies: dailies,
+        gfsWeeklies: weeklies,
+        gfsMonthlies: monthlies,
+        gfsYearlies: yearlies,
+
+        // Extra calculator fields (not all used by current simulator)
+        compressBy,
+        backupWindowHours,
+        directToObject,
+        useVaultPerformance,
+        useVaultCapacity,
+        copyPolicy,
+        movePolicy,
+        movePeriodDays,
+        archiveTierEnabled,
+        archiveMovePeriodDays,
+        performanceTierImmutable,
+        capacityTierImmutable,
+        performanceTierImmutabilityDays,
+        capacityTierImmutabilityDays
+    };
+
+    debugLog("Extracted Values:", JSON.stringify(cfg, null, 2));
+
+    /* ---------- required fields for current simulator ---------- */
 
     const required = {
         initialSizeGB,
         dailyChangeRate,
         annualGrowthRate,
-        retention,
+        syntheticInterval,
         minImmutability,
         blockGenWindow,
-        syntheticInterval
+        retention
     };
 
     for (const [name, val] of Object.entries(required)) {
@@ -178,16 +385,5 @@ function parseCalculatorInput(text) {
     }
 
     debugLog("=== parseCalculatorInput() COMPLETE ===");
-
-    return {
-        valid: true,
-        initialSizeGB,
-        dailyChangeRate,
-        annualGrowthRate,
-        retention,
-        minImmutability,
-        blockGenWindow,
-        syntheticInterval,
-        simDays
-    };
+    return cfg;
 }
